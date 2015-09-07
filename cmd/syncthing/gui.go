@@ -618,7 +618,7 @@ func (s *apiService) getDBFile(w http.ResponseWriter, r *http.Request) {
 	gf, _ := s.model.CurrentGlobalFile(folder, file)
 	lf, _ := s.model.CurrentFolderFile(folder, file)
 
-	av := s.model.Availability(folder, file)
+	av := s.model.Availability(folder, file, protocol.Vector{}, protocol.BlockInfo{})
 	sendJSON(w, map[string]interface{}{
 		"global":       jsonFileInfo(gf),
 		"local":        jsonFileInfo(lf),
