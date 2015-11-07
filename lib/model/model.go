@@ -86,10 +86,10 @@ type Model struct {
 	folderStatRefs     map[string]*stats.FolderStatisticsReference            // folder -> statsRef
 	fmut               sync.RWMutex                                           // protects the above
 
-	conn         map[protocol.DeviceID]Connection
-	deviceVer    map[protocol.DeviceID]string
-	devicePaused map[protocol.DeviceID]bool
-	pmut         sync.RWMutex // protects the above
+	conn              map[protocol.DeviceID]Connection
+	deviceClusterConf map[protocol.DeviceID]protocol.ClusterConfigMessage
+	devicePaused      map[protocol.DeviceID]bool
+	pmut              sync.RWMutex // protects the above
 }
 
 var (
@@ -127,11 +127,10 @@ func NewModel(cfg *config.Wrapper, id protocol.DeviceID, deviceName, clientName,
 		folderRunnerTokens: make(map[string][]suture.ServiceToken),
 		folderStatRefs:     make(map[string]*stats.FolderStatisticsReference),
 		conn:               make(map[protocol.DeviceID]Connection),
-		deviceVer:          make(map[protocol.DeviceID]string),
+		deviceClusterConf:  make(map[protocol.DeviceID]protocol.ClusterConfigMessage),
 		devicePaused:       make(map[protocol.DeviceID]bool),
-
-		fmut: sync.NewRWMutex(),
-		pmut: sync.NewRWMutex(),
+		fmut:               sync.NewRWMutex(),
+		pmut:               sync.NewRWMutex(),
 	}
 	if cfg.Options().ProgressUpdateIntervalS > -1 {
 		go m.progressEmitter.Serve()
@@ -315,7 +314,7 @@ func (m *Model) ConnectionStats() map[string]interface{} {
 	conns := make(map[string]ConnectionInfo, len(devs))
 	for device := range devs {
 		ci := ConnectionInfo{
-			ClientVersion: m.deviceVer[device],
+			ClientVersion: m.deviceVersion(device),
 			Paused:        m.devicePaused[device],
 		}
 		if conn, ok := m.conn[device]; ok {
@@ -606,28 +605,31 @@ func (m *Model) folderSharedWithUnlocked(folder string, deviceID protocol.Device
 
 func (m *Model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterConfigMessage) {
 	m.pmut.Lock()
-	if cm.ClientName == "syncthing" {
-		m.deviceVer[deviceID] = cm.ClientVersion
-	} else {
-		m.deviceVer[deviceID] = cm.ClientName + " " + cm.ClientVersion
-	}
+	_, exists := m.deviceClusterConf[deviceID]
+	conn := m.conn[deviceID]
+	m.deviceClusterConf[deviceID] = cm
+	m.pmut.Unlock()
 
-	event := map[string]string{
-		"id":            deviceID.String(),
-		"deviceName":    cm.DeviceName,
-		"clientName":    cm.ClientName,
-		"clientVersion": cm.ClientVersion,
-	}
+	// Only fire off event and print the line if it's the first ClusterConfig
+	// we are seeing. We currently only send one, but we might send multiple
+	// in the future.
+	if !exists {
+		event := map[string]string{
+			"id":            deviceID.String(),
+			"deviceName":    cm.DeviceName,
+			"clientName":    cm.ClientName,
+			"clientVersion": cm.ClientVersion,
+		}
 
-	if conn, ok := m.conn[deviceID]; ok {
 		event["type"] = conn.Type.String()
 		addr := conn.RemoteAddr()
 		if addr != nil {
 			event["addr"] = addr.String()
 		}
-	}
 
-	m.pmut.Unlock()
+		events.Default.Log(events.DeviceConnected, event)
+		l.Infof(`Device %s client is "%s %s" named "%s"`, deviceID, cm.ClientName, cm.ClientVersion, cm.DeviceName)
+	}
 
 	// Check the peer device's announced folders against our own. Emits events
 	// for folders that we don't expect (unknown or not shared).
@@ -658,10 +660,6 @@ nextFolder:
 		}
 	}
 	m.fmut.Unlock()
-
-	events.Default.Log(events.DeviceConnected, event)
-
-	l.Infof(`Device %s client is "%s %s" named "%s"`, deviceID, cm.ClientName, cm.ClientVersion, cm.DeviceName)
 
 	var changed bool
 
@@ -771,7 +769,7 @@ func (m *Model) Close(device protocol.DeviceID, err error) {
 		closeRawConn(conn)
 	}
 	delete(m.conn, device)
-	delete(m.deviceVer, device)
+	delete(m.deviceClusterConf, device)
 	m.pmut.Unlock()
 }
 
@@ -1536,6 +1534,10 @@ func (m *Model) generateClusterConfig(device protocol.DeviceID) protocol.Cluster
 		ClientVersion: m.clientVersion,
 	}
 
+	if m.cfg.Options().ReceiveTempIndexes {
+		cm.Flags |= protocol.FlagClusterConfigTemporaryIndexes
+	}
+
 	m.fmut.RLock()
 	for _, folder := range m.deviceFolders[device] {
 		folderCfg := m.cfg.Folders()[folder]
@@ -1579,6 +1581,19 @@ func (m *Model) generateClusterConfig(device protocol.DeviceID) protocol.Cluster
 	m.fmut.RUnlock()
 
 	return cm
+}
+
+func (m *Model) deviceVersion(id protocol.DeviceID) string {
+	// caller must hold pmut
+	cfg, ok := m.deviceClusterConf[id]
+	if !ok {
+		return "Unknown"
+	}
+
+	if cfg.ClientName == "syncthing" {
+		return cfg.ClientVersion
+	}
+	return cfg.ClientName + " " + cfg.ClientVersion
 }
 
 func (m *Model) State(folder string) (string, time.Time, error) {
