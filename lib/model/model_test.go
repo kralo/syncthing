@@ -201,9 +201,17 @@ func benchmarkIndexUpdate(b *testing.B, nfiles, nufiles int) {
 	b.ReportAllocs()
 }
 
+type downloadProgressMessage struct {
+	folder  string
+	updates []protocol.FileDownloadProgressUpdate
+	flags   uint32
+	options []protocol.Option
+}
+
 type FakeConnection struct {
-	id          protocol.DeviceID
-	requestData []byte
+	id                       protocol.DeviceID
+	requestData              []byte
+	downloadProgressMessages []downloadProgressMessage
 }
 
 func (FakeConnection) Close() error {
@@ -251,8 +259,13 @@ func (FakeConnection) Statistics() protocol.Statistics {
 	return protocol.Statistics{}
 }
 
-func (FakeConnection) DownloadProgress(string, []protocol.FileDownloadProgressUpdate, uint32, []protocol.Option) {
-
+func (f *FakeConnection) DownloadProgress(folder string, updates []protocol.FileDownloadProgressUpdate, flags uint32, options []protocol.Option) {
+	f.downloadProgressMessages = append(f.downloadProgressMessages, downloadProgressMessage{
+		folder:  folder,
+		updates: updates,
+		flags:   flags,
+		options: options,
+	})
 }
 
 func BenchmarkRequest(b *testing.B) {
@@ -273,7 +286,7 @@ func BenchmarkRequest(b *testing.B) {
 		}
 	}
 
-	fc := FakeConnection{
+	fc := &FakeConnection{
 		id:          device1,
 		requestData: []byte("some data to return"),
 	}
@@ -315,7 +328,7 @@ func TestDeviceRename(t *testing.T) {
 	db := db.OpenMemory()
 	m := NewModel(cfg, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
 
-	fc := FakeConnection{
+	fc := &FakeConnection{
 		id:          device1,
 		requestData: []byte("some data to return"),
 	}
